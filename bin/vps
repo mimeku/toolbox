@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+# vps --help lists the Magpie address and status commands.
+import argparse
+import http.cookiejar
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+SSH = ["ssh", "-F", str(Path.home() / ".ssh/vps-magpie.conf")]
+HOST = "vps-magpie"
+SERVICE = f"gui/{os.getuid()}/local.magpie.vps-tunnel"
+CREDENTIALS = Path.home() / ".config/vps-magpie/credentials.json"
+API_REMOTE_PORT = 3425
+WEB_REMOTE_PORT = 3430
+
+
+class ForwardConfigError(ValueError):
+    pass
+
+
+def ssh_config():
+    result = subprocess.run(SSH + ["-G", HOST], capture_output=True, text=True, check=True)
+    options = {}
+    forwards = []
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition(" ")
+        if key == "localforward":
+            forwards.append(value)
+        elif key in ("user", "hostname", "port"):
+            options[key] = value
+    return options, forwards
+
+
+def local_url(forwards, remote_port):
+    urls = set()
+    for forward in forwards:
+        # ssh -G brackets explicit bind addresses, including IPv4 and hostnames.
+        match = re.fullmatch(r"(?:\[([^\]]*)\]:)?(\d+)\s+\[[^\]]+\]:(\d+)", forward)
+        if not match or int(match[3]) != remote_port:
+            continue
+        host, port = match[1], match[2]
+        if host in (None, "", "*", "0.0.0.0"):
+            host = "127.0.0.1"
+        elif host == "::":
+            host = "::1"
+        if ":" in host:
+            host = f"[{host}]"
+        urls.add(f"http://{host}:{port}")
+    if len(urls) != 1:
+        raise ForwardConfigError(f"远端端口 {remote_port} 需要一个本地 TCP 转发，找到 {len(urls)} 个")
+    return urls.pop()
+
+
+def check_background_service():
+    service = subprocess.run(["launchctl", "print", SERVICE], capture_output=True)
+    loaded = service.returncode == 0
+    print("后台自动重连：" + ("已加载" if loaded else "未加载"))
+    return loaded
+
+
+def check_services(api_url, web_login_url, creds):
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+    )
+    request = urllib.request.Request(
+        api_url + "/v1/models", headers={"Authorization": "Bearer " + creds["gateway_key"]},
+    )
+    with opener.open(request, timeout=8) as response:
+        models = json.load(response)["data"]
+    print(f"Magpie API：认证成功，可见 {len(models)} 个模型")
+    with opener.open(web_login_url, timeout=8) as response:
+        if response.status != 200:
+            print(f"Magpie 管理页：HTTP {response.status}")
+            return 2
+    print("Magpie 管理页：正常")
+    print("Magpie 隧道：端口转发正常")
+    print(f"本机 API：{api_url}")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description="默认检查 Magpie 状态并输出管理页地址。")
+    parser.add_argument("action", nargs="?", choices=["address", "check"],
+                        help="address 输出本机 API 和管理页地址，check 检查状态")
+    args = parser.parse_args()
+    try:
+        target, forwards = ssh_config()
+        api_url = local_url(forwards, API_REMOTE_PORT)
+        address = local_url(forwards, WEB_REMOTE_PORT) + "/"
+        if args.action == "address":
+            print(f"本机 API：{api_url}")
+            print(f"管理页地址：{address}")
+            return 0
+
+        loaded = check_background_service()
+        print(f"SSH 配置目标：{target['user']}@{target['hostname']}:{target['port']}")
+        creds = json.loads(CREDENTIALS.read_text())
+        login_url = address + "?" + urllib.parse.urlencode({"k": creds["web_key"]})
+        status = check_services(api_url, login_url, creds)
+        if args.action is None:
+            print(f"管理页地址：{address}")
+        return status or int(not loaded)
+    except ForwardConfigError as error:
+        print(f"SSH 配置错误：{error}", file=sys.stderr)
+    except urllib.error.HTTPError as error:
+        print(f"Magpie 接口异常：HTTP {error.code}", file=sys.stderr)
+    except (urllib.error.URLError, ConnectionError, TimeoutError):
+        print("通过本机转发访问 Magpie 失败，请查看 ~/Library/Logs/vps-magpie/tunnel.log", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        # Exceptions may contain a URL with the web key.
+        print(f"Magpie 操作失败：{type(error).__name__}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
