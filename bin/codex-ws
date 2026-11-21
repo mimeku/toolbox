@@ -1,0 +1,68 @@
+#!/bin/sh
+# codex-ws: run codex with a per-app session directory (CODEX_HOME).
+#
+#   codex-ws <name|path> [codex args...]
+#
+#   <name>  -> CODEX_HOME=$HOME/.codex-<name>   (e.g. orca -> ~/.codex-orca)
+#   <path>  -> anything containing '/' is used as CODEX_HOME directly
+#   All remaining args are passed to codex unchanged.
+#
+#   codex-ws --list     list existing ~/.codex-* homes
+#
+# Env:
+#   CODEX_BIN   explicit codex executable (skip auto-detection)
+set -eu
+
+die() { echo "codex-ws: $*" >&2; exit 1; }
+
+usage() {
+  sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+[ $# -ge 1 ] || usage 1
+
+case "$1" in
+  -h|--help) usage 0 ;;
+  --list)
+    for d in "$HOME"/.codex-*; do [ -d "$d" ] && echo "${d##*/.codex-}  $d"; done
+    exit 0 ;;
+  -*) die "first argument must be a session name or path, got '$1'" ;;
+esac
+
+target=$1; shift
+case "$target" in
+  */*) home=$target ;;
+  *)
+    printf '%s' "$target" | grep -Eq '^[A-Za-z0-9._-]+$' || die "invalid name '$target'"
+    home="$HOME/.codex-$target" ;;
+esac
+
+# First use: create home and seed login/config from the default ~/.codex,
+# so a new app doesn't require logging in again.
+if [ ! -d "$home" ]; then
+  mkdir -p "$home"
+  for f in auth.json config.toml; do
+    [ -f "$HOME/.codex/$f" ] && cp -p "$HOME/.codex/$f" "$home/$f"
+  done
+  echo "codex-ws: created $home" >&2
+fi
+export CODEX_HOME="$home"
+
+# Resolve codex at runtime instead of hardcoding a path: Homebrew node
+# upgrades and interrupted `npm i -g` runs can break /opt/homebrew/bin/codex.
+if [ -n "${CODEX_BIN:-}" ]; then
+  exec "$CODEX_BIN" "$@"
+fi
+if bin=$(command -v codex 2>/dev/null) && [ -x "$bin" ]; then
+  exec "$bin" "$@"
+fi
+# Fallback: bin link missing but the npm package is installed.
+if command -v npm >/dev/null 2>&1; then
+  js="$(npm root -g 2>/dev/null)/@openai/codex/bin/codex.js"
+  if [ -f "$js" ]; then
+    echo "codex-ws: 'codex' not on PATH, using $js (fix: npm install -g @openai/codex)" >&2
+    exec node "$js" "$@"
+  fi
+fi
+die "codex not found. Install with: npm install -g @openai/codex  (or set CODEX_BIN)"
