@@ -35,3 +35,17 @@ codex-ws --list
 ```
 
 On first use of a name it copies `auth.json`/`config.toml` from `~/.codex`.
+
+### vps
+
+Check the Magpie SSH tunnel on macOS and print its local URLs.
+
+```sh
+vps          # check status and print the API and admin page URLs
+vps check    # check the background service, API, and admin page
+vps address  # print both URLs without running checks
+```
+
+The `vps-magpie` host in `~/.ssh/vps-magpie.conf` supplies the SSH target and local forwards.
+The API uses the forward to remote port `3425` and the admin page uses the one to `3430`.
+Health checks read `gateway_key` and `web_key` from `~/.config/vps-magpie/credentials.json`.
